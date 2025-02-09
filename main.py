@@ -1,32 +1,81 @@
-from fastapi import FastAPI
-from models import MsgPayload
+from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from db import init_db, SessionLocal, User, Chat
+
+# Initialize the database
+init_db()
 
 app = FastAPI()
-messages_list: dict[int, MsgPayload] = {}
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-@app.get("/")
-def root() -> dict[str, str]:
-    return {"message": "Hello"}
+# Pydantic models for API requests
+class Message(BaseModel):
+    message: str
+    username: str = None
 
+class UserCreate(BaseModel):
+    username: str
+    password: str
 
-# About page route
-@app.get("/about")
-def about() -> dict[str, str]:
-    return {"message": "This is the about page."}
+class ChatCreate(BaseModel):
+    username: str
+    message: str
 
+# Dependency to get DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
-# Route to add a message
-@app.post("/messages/{msg_name}/")
-def add_msg(msg_name: str) -> dict[str, MsgPayload]:
-    # Generate an ID for the item based on the highest ID in the messages_list
-    msg_id = max(messages_list.keys()) + 1 if messages_list else 0
-    messages_list[msg_id] = MsgPayload(msg_id=msg_id, msg_name=msg_name)
+from fastapi.staticfiles import StaticFiles
+app.mount("/", StaticFiles(directory="react-frontend/build", html=True), name="react")
 
-    return {"message": messages_list[msg_id]}
+@app.post("/message")
+def send_message(msg: Message):
+    # Basic response logic using user's message and username if provided.
+    if msg.username:
+        response = f"I'm here to help, {msg.username}! You said '{msg.message}'"
+    else:
+        response = f"You said '{msg.message}'"
+    return {"message": f"Bot: {response}"}
 
+@app.post("/users")
+def create_user(user: UserCreate, db: Session = Depends(get_db)):
+    db_user = db.query(User).filter(User.username == user.username).first()
+    if db_user:
+        raise HTTPException(status_code=400, detail="Username already registered")
+    new_user = User(username=user.username, password=user.password)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return {"message": "User created successfully", "user_id": new_user.id}
 
-# Route to list all messages
-@app.get("/messages")
-def message_items() -> dict[str, dict[int, MsgPayload]]:
-    return {"messages:": messages_list}
+@app.post("/chats")
+def create_chat(chat: ChatCreate, db: Session = Depends(get_db)):
+    db_user = db.query(User).filter(User.username == chat.username).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="User does not exist")
+    new_chat = Chat(user_id=db_user.id, message=chat.message)
+    db.add(new_chat)
+    db.commit()
+    db.refresh(new_chat)
+    return {"message": "Chat saved successfully", "chat_id": new_chat.id}
+
+@app.get("/chats/{username}")
+def get_chats(username: str, db: Session = Depends(get_db)):
+    db_user = db.query(User).filter(User.username == username).first()
+    if not db_user:
+        raise HTTPException(status_code=400, detail="User does not exist")
+    chats = db.query(Chat).filter(Chat.user_id == db_user.id).all()
+    return {"chats": [{"message": chat.message, "timestamp": chat.timestamp} for chat in chats]}
